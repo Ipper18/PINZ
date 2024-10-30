@@ -5,12 +5,20 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QAction,
                              QMessageBox, QLabel, QLineEdit, QFormLayout,
                              QDialog, QDialogButtonBox, QTextEdit,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                             QGraphicsItem, QGraphicsRectItem, QMenu)
-from PyQt5.QtGui import QPixmap, QIcon, QImage, QPainter, QTransform, QCursor, QPainterPath, QPen
-from PyQt5.QtCore import Qt, QMimeData, QPointF, QSize, QDataStream, QRectF, QVariant
+                             QGraphicsItem, QGraphicsRectItem, QMenu, QSplitter)
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QPainter, QTransform, QCursor, QPainterPath, QPen, QFont
+from PyQt5.QtCore import Qt, QMimeData, QPointF, QSize, QDataStream, QRectF, QVariant, QBuffer, QByteArray, QIODevice
 from sqlalchemy import create_engine, Column, Integer, String
 from sqlalchemy.orm import sessionmaker, declarative_base
 import math
+import fitz
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import inch
+from collections import Counter
+from io import BytesIO  # Do przechowywania obrazu w pamięci
+from reportlab.lib.utils import ImageReader  # Do wczytywania obrazu z pamięci
+
 
 # Ustawienia bazy danych
 Base = declarative_base()
@@ -35,10 +43,11 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("System Wspomagający Projektowanie Sieci Teleinformatycznych")
-        self.resize(800, 600)
+        self.resize(1000, 800)
         self.initUI()
 
     def initUI(self):
+        # Menu
         menubar = self.menuBar()
         fileMenu = menubar.addMenu('Menu')
 
@@ -54,12 +63,58 @@ class MainWindow(QMainWindow):
         userManualAction.triggered.connect(self.openUserManual)
         fileMenu.addAction(userManualAction)
 
+        # Centralny widget z przyciskami
+        centralWidget = QWidget()
+        self.setCentralWidget(centralWidget)
+
+        layout = QVBoxLayout()
+        centralWidget.setLayout(layout)
+
+        # Odstępy, aby wyśrodkować przyciski pionowo
+        layout.addStretch()
+
+        # Układ dla przycisków
+        buttonsLayout = QHBoxLayout()
+        layout.addLayout(buttonsLayout)
+
+        # Odstępy, aby wyśrodkować przyciski poziomo
+        buttonsLayout.addStretch()
+
+        # Tworzenie przycisków
+        loadPlanButton = QPushButton("Wgraj Plan Budynku")
+        loadPlanButton.setFixedSize(200, 100)
+        loadPlanButton.setFont(QFont("Arial", 12, QFont.Bold))
+        loadPlanButton.clicked.connect(self.loadBuildingPlan)
+
+        viewDatabaseButton = QPushButton("Baza Danych Komponentów")
+        viewDatabaseButton.setFixedSize(300, 100)
+        viewDatabaseButton.setFont(QFont("Arial", 12, QFont.Bold))
+        viewDatabaseButton.clicked.connect(self.viewComponentDatabase)
+
+        userManualButton = QPushButton("Instrukcja Obsługi")
+        userManualButton.setFixedSize(200, 100)
+        userManualButton.setFont(QFont("Arial", 12, QFont.Bold))
+        userManualButton.clicked.connect(self.openUserManual)
+
+        # Dodawanie przycisków do układu
+        buttonsLayout.addWidget(loadPlanButton)
+        buttonsLayout.addSpacing(20)  # Odstęp między przyciskami
+        buttonsLayout.addWidget(viewDatabaseButton)
+        buttonsLayout.addSpacing(20)
+        buttonsLayout.addWidget(userManualButton)
+
+        # Odstępy, aby wyśrodkować przyciski poziomo
+        buttonsLayout.addStretch()
+
+        # Odstępy, aby wyśrodkować przyciski pionowo
+        layout.addStretch()
+
     def loadBuildingPlan(self):
         options = QFileDialog.Options()
         options |= QFileDialog.ReadOnly
         fileName, _ = QFileDialog.getOpenFileName(
             self, "Wybierz Plan Budynku", "",
-            "Image Files (*.png *.jpg *.bmp)", options=options)
+            "Pliki obrazów (*.png *.jpg *.bmp *.pdf)", options=options)
         if fileName:
             self.planEditorWindow = PlanEditorWindow(fileName)
             self.planEditorWindow.show()
@@ -172,7 +227,7 @@ class DraggablePixmapItem(QGraphicsPixmapItem):
         delete_action.triggered.connect(self.deleteComponent)
         menu.addAction(delete_action)
         menu.exec_(event.screenPos())
-        event.accept()  # Dodano tę linię
+        event.accept() 
 
     def deleteComponent(self):
         self.scene().removeItem(self)
@@ -293,16 +348,22 @@ class PlanEditorWindow(QMainWindow):
     def __init__(self, planFile):
         super().__init__()
         self.setWindowTitle("Edytor Planu Budynku")
-        self.resize(1000, 700)
+        self.resize(1200, 900)
         self.planFile = planFile
         self.initUI()
+        self.placedComponents = []
 
     def initUI(self):
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
 
-        mainLayout = QHBoxLayout()
+        # Główny układ pionowy
+        mainLayout = QVBoxLayout()
         centralWidget.setLayout(mainLayout)
+
+        # Tworzymy QSplitter
+        splitter = QSplitter(Qt.Horizontal)
+        mainLayout.addWidget(splitter)
 
         self.componentList = QListWidget()
         self.componentList.setIconSize(QSize(50, 50))
@@ -310,22 +371,58 @@ class PlanEditorWindow(QMainWindow):
         self.loadComponents()
 
         self.scene = QGraphicsScene()
-        self.view = GraphicsView(self.scene)
+        self.view = GraphicsView(self.scene, self)
         self.view.setAcceptDrops(True)
 
         self.loadPlan()
 
-        mainLayout.addWidget(self.componentList)
-        mainLayout.addWidget(self.view)
+        # Dodajemy listę komponentów i obszar roboczy do QSplitter
+        splitter.addWidget(self.componentList)
+        splitter.addWidget(self.view)
+
+        # Ustawiamy minimalne szerokości
+        self.componentList.setMinimumWidth(200)
+        self.view.setMinimumWidth(400)
+
+        # Ustawiamy proporcje początkowe
+        total_width = self.width()
+        splitter.setSizes([int(total_width * 0.33), int(total_width * 0.66)])
+
+        # Przyciski akcji
+        buttonLayout = QHBoxLayout()
+        mainLayout.addLayout(buttonLayout)
+
+        # Odstęp, aby przyciski były wyrównane do prawej
+        buttonLayout.addStretch()
 
         saveButton = QPushButton("Zapisz Projekt")
         saveButton.clicked.connect(self.saveProject)
-        mainLayout.addWidget(saveButton)
+        buttonLayout.addWidget(saveButton)
+
+        # Dodajemy nowy przycisk "Generuj Raport"
+        reportButton = QPushButton("Generuj Raport")
+        reportButton.clicked.connect(self.generateReport)
+        buttonLayout.addWidget(reportButton)
 
     def loadPlan(self):
-        pixmap = QPixmap(self.planFile)
-        self.planItem = self.scene.addPixmap(pixmap)
-        self.planItem.setZValue(-1)  # Ustaw plan na tło
+        if self.planFile.lower().endswith('.pdf'):
+            # Wczytanie pliku PDF i renderowanie pierwszej strony jako obraz
+            try:
+                doc = fitz.open(self.planFile)
+                page = doc.load_page(0)  # Wczytaj pierwszą stronę
+                pix = page.get_pixmap()
+                image_bytes = pix.tobytes("png")  # Użyj tonytes("png") zamiast getPNGData()
+                pixmap = QPixmap()
+                pixmap.loadFromData(image_bytes)
+                self.planItem = self.scene.addPixmap(pixmap)
+                self.planItem.setZValue(-1)
+            except Exception as e:
+                QMessageBox.critical(self, "Błąd", f"Nie można wczytać pliku PDF: {e}")
+        else:
+            # Wczytanie obrazu tak jak wcześniej
+            pixmap = QPixmap(self.planFile)
+            self.planItem = self.scene.addPixmap(pixmap)
+            self.planItem.setZValue(-1)  # Ustaw plan na tło
 
     def loadComponents(self):
         components = session.query(Component).all()
@@ -351,10 +448,113 @@ class PlanEditorWindow(QMainWindow):
             QMessageBox.information(
                 self, "Zapisano", "Projekt został zapisany.")
 
+    def generateReport(self):
+        if not self.placedComponents:
+            QMessageBox.warning(self, "Brak danych", "Nie dodano żadnych komponentów do planu.")
+            return
+
+        fileName, _ = QFileDialog.getSaveFileName(
+            self, "Zapisz Raport", "", "PDF Files (*.pdf)")
+        if fileName:
+            try:
+                # Tworzenie dokumentu PDF
+                c = canvas.Canvas(fileName, pagesize=letter)
+                width, height = letter
+
+                c.setFont("Helvetica-Bold", 16)
+                c.drawString(50, height - 50, "Raport z projektu sieci teleinformatycznej")
+
+                c.setFont("Helvetica", 12)
+                c.drawString(50, height - 80, f"Nazwa projektu: {self.planFile}")
+
+                # --- Dodanie obrazu projektu ---
+                # Renderowanie sceny do obrazu
+                rect = self.scene.itemsBoundingRect()
+                image = QImage(rect.size().toSize(), QImage.Format_ARGB32)
+                image.fill(Qt.white)
+                painter = QPainter(image)
+                self.scene.render(painter, target=QRectF(image.rect()), source=rect)
+                painter.end()
+
+                # Konwersja QImage do QByteArray
+                byte_array = QByteArray()
+                buffer = QBuffer(byte_array)
+                buffer.open(QIODevice.WriteOnly)
+                image.save(buffer, 'PNG')
+                buffer.close()
+
+                # Wczytanie obrazu do ReportLab
+                image_data = byte_array.data()
+                project_image = ImageReader(BytesIO(image_data))
+
+                # Obliczenie skali obrazu, aby pasował do strony
+                img_width, img_height = project_image.getSize()
+                max_width = width - 100  # Marginesy
+                max_height = height - 300  # Odjęcie miejsca na tekst
+
+                scale = min(max_width / img_width, max_height / img_height, 1.0)
+                img_width *= scale
+                img_height *= scale
+
+                # Pozycja obrazu
+                img_x = (width - img_width) / 2
+                img_y = height - img_height - 120  # Odjęcie miejsca na nagłówek
+
+                # Rysowanie obrazu
+                c.drawImage(project_image, img_x, img_y, width=img_width, height=img_height)
+
+                y_position = img_y - 20  # Ustawienie pozycji poniżej obrazu
+
+                # --- Kontynuacja generowania raportu ---
+
+                # Grupowanie komponentów
+                component_counts = Counter()
+                total_cost = 0
+
+                for comp in self.placedComponents:
+                    component_counts[comp.name] += 1
+                    total_cost += comp.cost
+
+                c.setFont("Helvetica-Bold", 14)
+                c.drawString(50, y_position, "Uzyte komponenty:")
+                y_position -= 20
+
+                c.setFont("Helvetica", 12)
+                for comp_name, count in component_counts.items():
+                    comp = session.query(Component).filter_by(name=comp_name).first()
+                    line = f"- {comp_name} (Producent: {comp.manufacturer}, Typ: {comp.type}) x {count}, Cena jednostkowa: {comp.cost} zl, Lacznie: {comp.cost * count} zl"
+                    c.drawString(60, y_position, line)
+                    y_position -= 20
+                    total_cost += comp.cost * (count - 1)  # Dodajemy koszt dodatkowych sztuk
+
+                    # Sprawdzamy, czy nie wychodzimy poza stronę
+                    if y_position < 50:
+                        c.showPage()
+                        y_position = height - 50
+
+                # Szacunkowy koszt wykonania pracy (np. 20% kosztów sprzętu)
+                labor_cost = total_cost * 0.2
+                total_project_cost = total_cost + labor_cost
+
+                y_position -= 20
+                c.setFont("Helvetica-Bold", 12)
+                c.drawString(50, y_position, f"Laczny koszt komponentów: {total_cost} zl")
+                y_position -= 20
+                c.drawString(50, y_position, f"Szacunkowy koszt wykonania pracy (20%): {labor_cost:.2f} zl")
+                y_position -= 20
+                c.drawString(50, y_position, f"Laczny koszt projektu: {total_project_cost:.2f} zl")
+
+                # Zakończenie i zapis pliku PDF
+                c.save()
+                QMessageBox.information(self, "Raport zapisany", "Raport został pomyślnie zapisany.")
+            except Exception as e:
+                QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas generowania raportu: {e}")
+
+
 # Niestandardowy QGraphicsView do obsługi przeciągania i upuszczania
 class GraphicsView(QGraphicsView):
-    def __init__(self, scene):
-        super().__init__(scene)
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
         self.setRenderHint(QPainter.Antialiasing)
         self._pan = False
         self._panStartX = 0
@@ -362,6 +562,7 @@ class GraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.NoDrag)
         self.setInteractive(True)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.parentWindow = parent  # Referencja do PlanEditorWindow
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -449,6 +650,10 @@ class GraphicsView(QGraphicsView):
         self.scene().addItem(item)
         item.setPos(self.mapToScene(position))
         item.setFocus()
+
+        # Dodajemy komponent do listy w PlanEditorWindow
+        if self.parentWindow:
+            self.parentWindow.placedComponents.append(comp)
 
 # Okno bazy danych komponentów
 class ComponentDatabaseWindow(QWidget):
