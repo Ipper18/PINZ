@@ -1,24 +1,35 @@
 import sys
 import os
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QAction,
-                             QFileDialog, QWidget, QVBoxLayout, QHBoxLayout,
-                             QPushButton, QListWidget, QListWidgetItem,
-                             QMessageBox, QLabel, QLineEdit, QFormLayout,
-                             QDialog, QDialogButtonBox, QTextEdit,
-                             QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                             QGraphicsItem, QGraphicsRectItem, QMenu, QSplitter, QComboBox, QTreeWidget, QTreeWidgetItem)
-from PyQt5.QtGui import QPixmap, QIcon, QImage, QPainter, QTransform, QCursor, QPainterPath, QPen, QFont
-from PyQt5.QtCore import Qt, QMimeData, QPointF, QSize, QDataStream, QRectF, QVariant, QBuffer, QByteArray, QIODevice
-from sqlalchemy import create_engine, Column, Integer, String
-from sqlalchemy.orm import sessionmaker, declarative_base
+from collections import Counter
+from io import BytesIO
 import math
 import fitz
+from datetime import datetime
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QAction, QFileDialog, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QListWidget, QListWidgetItem, QMessageBox, QLabel, QLineEdit, QFormLayout,
+    QDialog, QDialogButtonBox, QTextEdit, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
+    QGraphicsItem, QGraphicsRectItem, QGraphicsLineItem, QMenu, QSplitter, QComboBox,
+    QTreeWidget, QTreeWidgetItem, QShortcut, QGraphicsObject
+)
+from PyQt5.QtGui import (
+    QPixmap, QIcon, QImage, QPainter, QTransform, QCursor, QPainterPath, QPen, QFont,
+    QPainterPathStroker, QKeySequence, QBrush 
+)
+from PyQt5.QtCore import (
+    Qt, QMimeData, QPointF, QSize, QDataStream, QRectF, QVariant, QBuffer, QByteArray,
+    QIODevice, QEvent, QLineF, pyqtSignal
+)
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.orm import sessionmaker, declarative_base
 from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle, PageBreak
 from reportlab.lib.units import inch
-from collections import Counter
-from io import BytesIO  # Do przechowywania obrazu w pamięci
-from reportlab.lib.utils import ImageReader  # Do wczytywania obrazu z pamięci
+from reportlab.lib import colors
+from reportlab.lib.utils import ImageReader
+from reportlab.pdfgen import canvas
+
 
 
 # Ustawienia bazy danych
@@ -34,7 +45,7 @@ class Component(Base):
     manufacturer = Column(String)
     cost = Column(Integer)
     type = Column(String)
-    icon_path = Column(String)  # Ścieżka do ikony
+    icon_path = Column(String)  # scieżka do ikony
 
 engine = create_engine('sqlite:///components.db')
 Base.metadata.create_all(engine)
@@ -46,11 +57,11 @@ Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 session = Session()
 
-# Główne okno aplikacji
+# Glówne okno aplikacji
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("System Wspomagający Projektowanie Sieci Teleinformatycznych")
+        self.setWindowTitle("System Wspomagajacy Projektowanie Sieci Teleinformatycznych")
         self.resize(1000, 800)
         self.initUI()
 
@@ -67,7 +78,7 @@ class MainWindow(QMainWindow):
         viewDatabaseAction.triggered.connect(self.viewComponentDatabase)
         fileMenu.addAction(viewDatabaseAction)
 
-        userManualAction = QAction('Instrukcja Obsługi', self)
+        userManualAction = QAction('Instrukcja Obslugi', self)
         userManualAction.triggered.connect(self.openUserManual)
         fileMenu.addAction(userManualAction)
 
@@ -78,14 +89,14 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         centralWidget.setLayout(layout)
 
-        # Odstępy, aby wyśrodkować przyciski pionowo
+        # Odstępy, aby wysrodkowac przyciski pionowo
         layout.addStretch()
 
-        # Układ dla przycisków
+        # Uklad dla przycisków
         buttonsLayout = QHBoxLayout()
         layout.addLayout(buttonsLayout)
 
-        # Odstępy, aby wyśrodkować przyciski poziomo
+        # Odstępy, aby wysrodkowac przyciski poziomo
         buttonsLayout.addStretch()
 
         # Tworzenie przycisków
@@ -99,22 +110,22 @@ class MainWindow(QMainWindow):
         viewDatabaseButton.setFont(QFont("Arial", 12, QFont.Bold))
         viewDatabaseButton.clicked.connect(self.viewComponentDatabase)
 
-        userManualButton = QPushButton("Instrukcja Obsługi")
+        userManualButton = QPushButton("Instrukcja Obslugi")
         userManualButton.setFixedSize(200, 100)
         userManualButton.setFont(QFont("Arial", 12, QFont.Bold))
         userManualButton.clicked.connect(self.openUserManual)
 
-        # Dodawanie przycisków do układu
+        # Dodawanie przycisków do ukladu
         buttonsLayout.addWidget(loadPlanButton)
         buttonsLayout.addSpacing(20)  # Odstęp między przyciskami
         buttonsLayout.addWidget(viewDatabaseButton)
         buttonsLayout.addSpacing(20)
         buttonsLayout.addWidget(userManualButton)
 
-        # Odstępy, aby wyśrodkować przyciski poziomo
+        # Odstępy, aby wysrodkowac przyciski poziomo
         buttonsLayout.addStretch()
 
-        # Odstępy, aby wyśrodkować przyciski pionowo
+        # Odstępy, aby wysrodkowac przyciski pionowo
         layout.addStretch()
 
     def loadBuildingPlan(self):
@@ -135,11 +146,14 @@ class MainWindow(QMainWindow):
         self.userManualWindow = UserManualWindow()
         self.userManualWindow.show()
 
-# Klasa reprezentująca komponent na scenie z możliwością obracania i skalowania
-class DraggablePixmapItem(QGraphicsPixmapItem):
+# Klasa reprezentujaca komponent na scenie z możliwoscia obracania i skalowania
+class DraggablePixmapItem(QGraphicsObject):
+    positionChanged = pyqtSignal()
+
     def __init__(self, comp, parent=None):
-        super().__init__(QPixmap(comp.icon_path))
+        super().__init__(parent)
         self.comp = comp
+        self.pixmap = QPixmap(comp.icon_path)
         self.setFlags(
             QGraphicsItem.ItemIsMovable |
             QGraphicsItem.ItemIsSelectable |
@@ -147,29 +161,25 @@ class DraggablePixmapItem(QGraphicsPixmapItem):
             QGraphicsItem.ItemIsFocusable
         )
         self.setAcceptHoverEvents(True)
-        self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)  # Dodano tę linię
-        self.setTransformationMode(Qt.SmoothTransformation)
+        self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
         self.setCursor(Qt.OpenHandCursor)
         self.setAcceptTouchEvents(True)
         self.rotation_angle = 0
-        self.scale_factor = 1.0  # Dodano do śledzenia skali
-        self.setToolTip(f"{comp.name}\n{comp.type}\n{comp.manufacturer}\nKoszt: {comp.cost} zł")
-
-        # Ustawienie zValue na 1, aby komponent był nad planem budynku
+        self.scale_factor = 1.0
+        self.setToolTip(f"{comp.name}\n{comp.type}\n{comp.manufacturer}\nKoszt: {comp.cost} zl")
         self.setZValue(1)
 
-        # Załaduj ikonę obrotu i zmniejsz jej rozmiar
+        # Inicjalizacja ikonki obrotu
         self.rotate_icon_pixmap = QPixmap('rotate_icon.png').scaled(16, 16, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.rotate_icon_item = RotateIconItem(self)
         self.rotate_icon_item.setPixmap(self.rotate_icon_pixmap)
-        self.rotate_icon_item.setTransformationMode(Qt.SmoothTransformation)
         self.updateRotateIconPosition()
         self.rotate_icon_item.setFlag(QGraphicsItem.ItemIgnoresTransformations)
-        self.rotate_icon_item.setZValue(2)  # Ustawienie zValue ikonki obrotu wyżej niż komponent
+        self.rotate_icon_item.setZValue(2)
         self.rotate_icon_item.setOpacity(1)
-        self.rotate_icon_item.hide()  # Ukryj ikonę na początku
+        self.rotate_icon_item.hide()
 
-        # Stwórz uchwyty do zmiany rozmiaru w rogach
+        # Uchwyty do zmiany rozmiaru
         self.resize_handles = []
         for position in ['top-left', 'top-right', 'bottom-left', 'bottom-right']:
             handle = ResizeHandleItem(self, position)
@@ -180,14 +190,20 @@ class DraggablePixmapItem(QGraphicsPixmapItem):
 
         self.updateResizeHandles()
 
+    def boundingRect(self):
+        return QRectF(0, 0, self.pixmap.width(), self.pixmap.height())
+
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.drawPixmap(0, 0, self.pixmap)
+
     def updateRotateIconPosition(self):
-        # Aktualizacja pozycji ikonki obrotu względem rozmiaru komponentu
-        offset_x = self.boundingRect().width() / 2 - self.rotate_icon_pixmap.width() / 2
-        offset_y = -self.rotate_icon_pixmap.height() - 5  # Odstęp od góry komponentu
+        rect = self.boundingRect()
+        offset_x = rect.width() / 2 - self.rotate_icon_pixmap.width() / 2
+        offset_y = -self.rotate_icon_pixmap.height() - 5
         self.rotate_icon_item.setPos(offset_x, offset_y)
 
     def updateResizeHandles(self):
-        # Aktualizacja pozycji uchwytów do zmiany rozmiaru
         rect = self.boundingRect()
         positions = {
             'top-left': (rect.left(), rect.top()),
@@ -202,12 +218,10 @@ class DraggablePixmapItem(QGraphicsPixmapItem):
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemSelectedChange:
             if value == True:
-                # Komponent został wybrany
                 self.rotate_icon_item.show()
                 for handle in self.resize_handles:
                     handle.show()
             else:
-                # Komponent został odznaczony
                 self.rotate_icon_item.hide()
                 for handle in self.resize_handles:
                     handle.hide()
@@ -223,28 +237,40 @@ class DraggablePixmapItem(QGraphicsPixmapItem):
             self._is_dragging = False
             super().mousePressEvent(event)
         elif event.button() == Qt.RightButton:
-            # Upewnij się, że komponent pozostaje wybrany
             self.setSelected(True)
             event.accept()
         else:
             super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self.positionChanged.emit()
 
     def contextMenuEvent(self, event):
         menu = QMenu()
         delete_action = QAction("Usuń komponent", menu)
         delete_action.triggered.connect(self.deleteComponent)
         menu.addAction(delete_action)
+
+        add_link_action = QAction("Dodaj lacze", menu)
+        add_link_action.triggered.connect(self.addLink)
+        menu.addAction(add_link_action)
+
         menu.exec_(event.screenPos())
-        event.accept() 
+        event.accept()
+
+    def addLink(self):
+        plan_editor = self.scene().views()[0].parentWindow
+        plan_editor.startLinking(self)
 
     def deleteComponent(self):
+        # Usuń powiazane linie
+        plan_editor = self.scene().views()[0].parentWindow
+        links_to_remove = [link for link in plan_editor.links if self in (link.start_item, link.end_item)]
+        for link in links_to_remove:
+            plan_editor.scene.removeItem(link)
+            plan_editor.links.remove(link)
         self.scene().removeItem(self)
-
-    def shape(self):
-        # Zwracamy kształt obejmujący cały pixmap
-        path = QPainterPath()
-        path.addRect(self.boundingRect())
-        return path
 
     def setRotationAngle(self, angle):
         self.rotation_angle = angle % 360
@@ -257,6 +283,9 @@ class DraggablePixmapItem(QGraphicsPixmapItem):
         self.setScale(self.scale_factor)
         self.updateRotateIconPosition()
         self.updateResizeHandles()
+        # Inicjujemy tryb laczenia w glównym oknie edytora planu
+        plan_editor = self.scene().views()[0].parentWindow
+        plan_editor.startLinking(self)
 
 # Klasa uchwytu do zmiany rozmiaru
 class ResizeHandleItem(QGraphicsRectItem):
@@ -266,7 +295,7 @@ class ResizeHandleItem(QGraphicsRectItem):
         self.parent_item = parent_item
         self.position = position  # 'top-left', 'top-right', etc.
         self.setBrush(Qt.black)
-        self.setPen(QPen(Qt.NoPen))  # Poprawka błędu
+        self.setPen(QPen(Qt.NoPen))  # Poprawka blędu
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         self.setAcceptHoverEvents(True)
@@ -281,11 +310,11 @@ class ResizeHandleItem(QGraphicsRectItem):
         event.accept()
 
     def mouseMoveEvent(self, event):
-        # Oblicz nowy współczynnik skalowania na podstawie ruchu myszy
+        # Oblicz nowy wspólczynnik skalowania na podstawie ruchu myszy
         new_pos = event.scenePos()
         delta = new_pos - self.original_pos
 
-        # Współrzędne w lokalnym układzie współrzędnych
+        # Wspólrzędne w lokalnym ukladzie wspólrzędnych
         if self.position == 'bottom-right':
             scale_change = 1 + delta.x() / self.parent_item.boundingRect().width()
         elif self.position == 'bottom-left':
@@ -312,14 +341,14 @@ class ResizeHandleItem(QGraphicsRectItem):
 # Klasa ikonki obrotu
 class RotateIconItem(QGraphicsPixmapItem):
     def __init__(self, parent):
-        super().__init__(parent)
+        super().__init__(parent=parent)
         self.parent_item = parent
         self.setCursor(Qt.SizeAllCursor)
         self.setAcceptedMouseButtons(Qt.LeftButton)
         self.is_rotating = False
 
     def shape(self):
-        # Zwracamy obszar obejmujący cały prostokąt ikony
+        # Zwracamy obszar obejmujacy caly prostokat ikony
         path = QPainterPath()
         path.addEllipse(self.boundingRect())
         return path
@@ -351,6 +380,10 @@ class RotateIconItem(QGraphicsPixmapItem):
         else:
             super().mouseReleaseEvent(event)
 
+    def paint(self, painter, option, widget=None):
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        super().paint(painter, option, widget)
+
 # Okno edytora planu
 class PlanEditorWindow(QMainWindow):
     def __init__(self, planFile):
@@ -359,17 +392,23 @@ class PlanEditorWindow(QMainWindow):
         self.resize(1200, 900)
         self.planFile = planFile
         self.placedComponents = []
-        self.target_plan_width = 1200  # Ustawienie docelowej szerokości planu
-        self.plan_scale_factor = 1.0  # Inicjalizacja współczynnika skalowania planu
-        self.component_scale_factor = 0.5  # Dodatkowy współczynnik skalowania komponentów
+        self.target_plan_width = 1200  # Ustawienie docelowej szerokosci planu
+        self.plan_scale_factor = 1.0  # Inicjalizacja wspólczynnika skalowania planu
+        self.component_scale_factor = 0.5  # Dodatkowy wspólczynnik skalowania komponentów
+        self.linking = False
+        self.first_component = None
+        self.links = []  # Lista przechowujaca informacje o laczach
         self.initUI()
+
+        self.delete_shortcut = QShortcut(QKeySequence(Qt.Key_Delete), self)
+        self.delete_shortcut.activated.connect(self.deleteSelectedItems)
 
 
     def initUI(self):
         centralWidget = QWidget()
         self.setCentralWidget(centralWidget)
 
-        # Główny układ pionowy
+        # Glówny uklad pionowy
         mainLayout = QVBoxLayout()
         centralWidget.setLayout(mainLayout)
 
@@ -379,7 +418,7 @@ class PlanEditorWindow(QMainWindow):
 
         # Zamiast QListWidget używamy QTreeWidget
         self.componentTree = QTreeWidget()
-        self.componentTree.setHeaderHidden(True)  # Ukrywamy nagłówek
+        self.componentTree.setHeaderHidden(True)  # Ukrywamy naglówek
         self.componentTree.setIconSize(QSize(50, 50))
         self.componentTree.setDragEnabled(True)
         self.loadComponents()
@@ -394,11 +433,11 @@ class PlanEditorWindow(QMainWindow):
         splitter.addWidget(self.componentTree)
         splitter.addWidget(self.view)
 
-        # Ustawiamy minimalne szerokości
+        # Ustawiamy minimalne szerokosci
         self.componentTree.setMinimumWidth(200)
         self.view.setMinimumWidth(400)
 
-        # Ustawiamy proporcje początkowe
+        # Ustawiamy proporcje poczatkowe
         total_width = self.width()
         splitter.setSizes([int(total_width * 0.33), int(total_width * 0.66)])
 
@@ -406,7 +445,7 @@ class PlanEditorWindow(QMainWindow):
         buttonLayout = QHBoxLayout()
         mainLayout.addLayout(buttonLayout)
 
-        # Odstęp, aby przyciski były wyrównane do prawej
+        # Odstęp, aby przyciski byly wyrównane do prawej
         buttonLayout.addStretch()
 
         saveButton = QPushButton("Zapisz Projekt")
@@ -433,25 +472,21 @@ class PlanEditorWindow(QMainWindow):
                 image_bytes = pix.tobytes("png")
                 pixmap = QPixmap()
                 pixmap.loadFromData(image_bytes)
-
-                # Nie skalujemy pixmapy
-                self.plan_scale_factor = 1.0
-                self.planItem = self.scene.addPixmap(pixmap)
-                self.planItem.setZValue(-1)
             except Exception as e:
                 QMessageBox.critical(self, "Błąd", f"Nie można wczytać pliku PDF: {e}")
+                return
         else:
             # Wczytanie obrazu bez skalowania
             pixmap = QPixmap(self.planFile)
-            self.plan_scale_factor = 1.0
-            self.planItem = self.scene.addPixmap(pixmap)
-            self.planItem.setZValue(-1)  # Ustaw plan na tło
+
+        # Ustawienie tła sceny na plan budynku
+        self.scene.setBackgroundBrush(QBrush(pixmap))
 
         # Ustawienie rozmiaru sceny na rozmiar planu budynku
-        self.scene.setSceneRect(self.planItem.boundingRect())
+        self.scene.setSceneRect(QRectF(pixmap.rect()))
 
     def scalePixmap(self, pixmap, target_width):
-        # Obliczenie współczynnika skalowania
+        # Obliczenie wspólczynnika skalowania
         original_width = pixmap.width()
         original_height = pixmap.height()
         scale_factor = target_width / original_width
@@ -465,13 +500,13 @@ class PlanEditorWindow(QMainWindow):
         # Pobieramy wszystkie komponenty z bazy danych
         components = session.query(Component).all()
 
-        # Tworzymy słownik kategorii
+        # Tworzymy slownik kategorii
         categories = {}
         for comp in components:
             if comp.type not in categories:
                 # Tworzymy nowy element kategorii
                 categoryItem = QTreeWidgetItem([comp.type])
-                categoryItem.setFlags(categoryItem.flags() & ~Qt.ItemIsDragEnabled)  # Wyłączamy przeciąganie dla kategorii
+                categoryItem.setFlags(categoryItem.flags() & ~Qt.ItemIsDragEnabled)  # Wylaczamy przeciaganie dla kategorii
                 self.componentTree.addTopLevelItem(categoryItem)
                 categories[comp.type] = categoryItem
 
@@ -483,11 +518,48 @@ class PlanEditorWindow(QMainWindow):
             item.setIcon(0, icon)
             categories[comp.type].addChild(item)
 
+    def deleteSelectedItems(self):
+        for item in self.scene.selectedItems():
+            if isinstance(item, ConnectionLine):
+                item.deleteLink()
+            elif isinstance(item, DraggablePixmapItem):
+                item.deleteComponent()
+    
+    def startLinking(self, component):
+        self.linking = True
+        self.first_component = component
+        self.view.setCursor(Qt.CrossCursor)  # Zmieniamy kursor, aby wskazac tryb laczenia
+
+    def finishLinking(self, second_component):
+        if self.first_component and second_component and self.first_component != second_component:
+            # Tworzymy linię między komponentami
+            link = ConnectionLine(self.first_component, second_component)
+            self.scene.addItem(link)
+            self.links.append(link)  # Dodajemy link do listy
+        self.linking = False
+        self.first_component = None
+        self.view.setCursor(Qt.ArrowCursor)  # Przywracamy domyslny kursor
+
+    def calculateCableLengths(self):
+        total_length_pixels = 0
+        for link in self.links:
+            start_point = link.start_item.sceneBoundingRect().center()
+            end_point = link.end_item.sceneBoundingRect().center()
+            length = QLineF(start_point, end_point).length()
+            total_length_pixels += length
+        # Przeliczenie pikseli na metry
+        # Zalóżmy skalę: 1 piksel = 0.05 metra (musisz dostosowac to do rzeczywistej skali planu)
+        total_length_meters = total_length_pixels * 0.05
+        # Zalóżmy koszt kabla: 2 zl za metr (dostosuj wedlug potrzeb)
+        cable_cost_per_meter = 2
+        total_cable_cost = total_length_meters * cable_cost_per_meter
+        return total_length_meters, total_cable_cost
+
     def saveProject(self):
         fileName, _ = QFileDialog.getSaveFileName(
             self, "Zapisz Projekt", "", "PNG Files (*.png)")
         if fileName:
-            # Dopasuj rozmiar obrazu do zawartości sceny
+            # Dopasuj rozmiar obrazu do zawartosci sceny
             rect = self.scene.itemsBoundingRect()
             image = QImage(rect.size().toSize(), QImage.Format_ARGB32)
             image.fill(Qt.white)
@@ -496,7 +568,7 @@ class PlanEditorWindow(QMainWindow):
             painter.end()
             image.save(fileName)
             QMessageBox.information(
-                self, "Zapisano", "Projekt został zapisany.")
+                self, "Zapisano", "Projekt zostal zapisany.")
 
     def generateReport(self):
         if not self.placedComponents:
@@ -507,19 +579,46 @@ class PlanEditorWindow(QMainWindow):
             self, "Zapisz Raport", "", "PDF Files (*.pdf)")
         if fileName:
             try:
-                # Tworzenie dokumentu PDF
-                c = canvas.Canvas(fileName, pagesize=letter)
-                width, height = letter
+                # Ustawienia dokumentu
+                doc = SimpleDocTemplate(
+                    fileName,
+                    pagesize=letter,
+                    rightMargin=50,
+                    leftMargin=50,
+                    topMargin=50,
+                    bottomMargin=50
+                )
+                Story = []
 
-                c.setFont("Helvetica-Bold", 16)
-                c.drawString(50, height - 50, "Raport z projektu sieci teleinformatycznej")
+                styles = getSampleStyleSheet()
+                styles.add(ParagraphStyle(name='Justify', alignment=1))
 
-                c.setFont("Helvetica", 12)
-                c.drawString(50, height - 80, f"Nazwa projektu: {self.planFile}")
+                # Dodajemy styl dla komórek tabeli
+                styles.add(ParagraphStyle(
+                    name='TableCell',
+                    fontName='Helvetica',
+                    fontSize=10,
+                    leading=12,
+                    alignment=0,  # Wyrównanie do lewej
+                    spaceAfter=0,
+                ))
 
-                # --- Dodanie obrazu projektu ---
+                # Tytuł raportu
+                Story.append(Paragraph("Raport z projektu sieci teleinformatycznej", styles['Title']))
+                Story.append(Spacer(1, 12))
+
+                # Nazwa projektu
+                Story.append(Paragraph(f"Nazwa projektu: {os.path.basename(self.planFile)}", styles['Normal']))
+                Story.append(Spacer(1, 12))
+
+                # Data wygenerowania raportu
+                current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                Story.append(Paragraph(f"Data wygenerowania raportu: {current_datetime}", styles['Normal']))
+                Story.append(Spacer(1, 12))
+
+                # Dodanie obrazu projektu
                 # Renderowanie sceny do obrazu
-                rect = self.scene.itemsBoundingRect()
+                rect = self.scene.sceneRect()  # Zmienione z itemsBoundingRect() na sceneRect()
                 image = QImage(rect.size().toSize(), QImage.Format_ARGB32)
                 image.fill(Qt.white)
                 painter = QPainter(image)
@@ -535,27 +634,12 @@ class PlanEditorWindow(QMainWindow):
 
                 # Wczytanie obrazu do ReportLab
                 image_data = byte_array.data()
-                project_image = ImageReader(BytesIO(image_data))
+                image_stream = BytesIO(image_data)
+                report_image = Image(image_stream)
+                report_image._restrictSize(doc.width, doc.height / 1.5)  # Dostosuj wysokość obrazu w raporcie
 
-                # Obliczenie skali obrazu, aby pasował do strony
-                img_width, img_height = project_image.getSize()
-                max_width = width - 100  # Marginesy
-                max_height = height - 300  # Odjęcie miejsca na tekst
-
-                scale = min(max_width / img_width, max_height / img_height, 1.0)
-                img_width *= scale
-                img_height *= scale
-
-                # Pozycja obrazu
-                img_x = (width - img_width) / 2
-                img_y = height - img_height - 120  # Odjęcie miejsca na nagłówek
-
-                # Rysowanie obrazu
-                c.drawImage(project_image, img_x, img_y, width=img_width, height=img_height)
-
-                y_position = img_y - 20  # Ustawienie pozycji poniżej obrazu
-
-                # --- Kontynuacja generowania raportu ---
+                Story.append(report_image)
+                Story.append(Spacer(1, 12))
 
                 # Grupowanie komponentów
                 component_counts = Counter()
@@ -565,43 +649,102 @@ class PlanEditorWindow(QMainWindow):
                     component_counts[comp.name] += 1
                     total_cost += comp.cost
 
-                c.setFont("Helvetica-Bold", 14)
-                c.drawString(50, y_position, "Uzyte komponenty:")
-                y_position -= 20
+                # Sekcja "Użyte komponenty"
+                Story.append(Paragraph("Uzyte komponenty:", styles['Heading2']))
+                Story.append(Spacer(1, 12))
 
-                c.setFont("Helvetica", 12)
+                # Przygotowanie danych do tabeli
+                data = [
+                    [
+                        Paragraph('Nazwa', styles['TableCell']),
+                        Paragraph('Producent', styles['TableCell']),
+                        Paragraph('Typ', styles['TableCell']),
+                        'Ilosc',
+                        'Cena jedn.',
+                        'Łaczny koszt'
+                    ]
+                ]
+                total_components_cost = 0
+
                 for comp_name, count in component_counts.items():
                     comp = session.query(Component).filter_by(name=comp_name).first()
-                    line = f"- {comp_name} (Producent: {comp.manufacturer}, Typ: {comp.type}) x {count}, Cena jednostkowa: {comp.cost} zl, Lacznie: {comp.cost * count} zl"
-                    c.drawString(60, y_position, line)
-                    y_position -= 20
-                    total_cost += comp.cost * (count - 1)  # Dodajemy koszt dodatkowych sztuk
+                    line_total_cost = comp.cost * count
+                    data.append([
+                        Paragraph(comp_name, styles['TableCell']),
+                        Paragraph(comp.manufacturer, styles['TableCell']),
+                        Paragraph(comp.type, styles['TableCell']),
+                        str(count),
+                        f"{comp.cost} zl",
+                        f"{line_total_cost} zl"
+                    ])
+                    total_components_cost += line_total_cost
 
-                    # Sprawdzamy, czy nie wychodzimy poza stronę
-                    if y_position < 50:
-                        c.showPage()
-                        y_position = height - 50
+                # Definiujemy szerokości kolumn
+                col_widths = [
+                    doc.width * 0.25,  # 25% szerokości dla Nazwy
+                    doc.width * 0.15,  # 15% dla Producenta
+                    doc.width * 0.15,  # 15% dla Typu
+                    doc.width * 0.1,   # 10% dla Ilości
+                    doc.width * 0.15,  # 15% dla Cena jedn.
+                    doc.width * 0.2    # 20% dla Łączny koszt
+                ]
 
-                # Szacunkowy koszt wykonania pracy (np. 20% kosztów sprzętu)
-                labor_cost = total_cost * 0.2
-                total_project_cost = total_cost + labor_cost
+                # Styl tabeli
+                table_style = TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),  # Wyrównanie do lewej
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 12),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ])
 
-                y_position -= 20
-                c.setFont("Helvetica-Bold", 12)
-                c.drawString(50, y_position, f"Laczny koszt komponentów: {total_cost} zl")
-                y_position -= 20
-                c.drawString(50, y_position, f"Szacunkowy koszt wykonania pracy (20%): {labor_cost:.2f} zl")
-                y_position -= 20
-                c.drawString(50, y_position, f"Laczny koszt projektu: {total_project_cost:.2f} zl")
+                component_table = Table(data, colWidths=col_widths, repeatRows=1)
+                component_table.setStyle(table_style)
+                Story.append(component_table)
+                Story.append(Spacer(1, 12))
 
-                # Zakończenie i zapis pliku PDF
-                c.save()
+                # Koszty
+                labor_cost = total_components_cost * 0.2
+                total_length_meters, total_cable_cost = self.calculateCableLengths()
+                total_project_cost = total_components_cost + labor_cost + total_cable_cost
+
+                # Sekcja podsumowania kosztów
+                Story.append(Paragraph("Podsumowanie kosztow:", styles['Heading2']))
+                Story.append(Spacer(1, 12))
+
+                costs_data = [
+                    ['Pozycja', 'Koszt'],
+                    ['Laczny koszt komponentow', f"{total_components_cost:.2f} zl"],
+                    ['Koszt wykonania pracy (20%)', f"{labor_cost:.2f} zl"],
+                    [f"Koszt kabli ({total_length_meters:.2f} m)", f"{total_cable_cost:.2f} zl"],
+                    ['Laczny koszt projektu', f"{total_project_cost:.2f} zl"],
+                ]
+
+                costs_table = Table(costs_data, colWidths=[doc.width / 2.0] * 2)
+                costs_table_style = TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),  # Wyrównanie do lewej
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 12),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ])
+                costs_table.setStyle(costs_table_style)
+                Story.append(costs_table)
+                Story.append(Spacer(1, 12))
+
+                # Zapis dokumentu
+                doc.build(Story)
                 QMessageBox.information(self, "Raport zapisany", "Raport został pomyślnie zapisany.")
             except Exception as e:
                 QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas generowania raportu: {e}")
 
 
-# Niestandardowy QGraphicsView do obsługi przeciągania i upuszczania
+
+
+# Niestandardowy QGraphicsView do obslugi przeciagania i upuszczania
 class GraphicsView(QGraphicsView):
     def __init__(self, scene, parent=None):
         super().__init__(scene)
@@ -616,21 +759,32 @@ class GraphicsView(QGraphicsView):
         self.parentWindow = parent  # Reference to PlanEditorWindow
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if self.parentWindow.linking:
+            item = self.itemAt(event.pos())
+            if isinstance(item, DraggablePixmapItem):
+                self.parentWindow.finishLinking(item)
+                event.accept()
+            else:
+                # Kliknięto w miejsce bez komponentu
+                self.parentWindow.linking = False
+                self.parentWindow.first_component = None
+                self.setCursor(Qt.ArrowCursor)
+                event.accept()
+        elif event.button() == Qt.LeftButton:
             item = self.itemAt(event.pos())
             if item is None:
                 # Rozpocznij przesuwanie widoku
-                self.setCursor(Qt.ClosedHandCursor)
                 self._pan = True
                 self._panStartX = event.x()
                 self._panStartY = event.y()
+                self.setCursor(Qt.ClosedHandCursor)
                 event.accept()
             else:
                 super().mousePressEvent(event)
         else:
             super().mousePressEvent(event)
 
-    # Upewnij się, że nie nadpisujemy innych zdarzeń, które mogą blokować menu kontekstowe
+    # Upewnij się, że nie nadpisujemy innych zdarzeń, które moga blokowac menu kontekstowe
 
     def mouseMoveEvent(self, event):
         if self._pan:
@@ -648,8 +802,8 @@ class GraphicsView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._pan:
             # Zakończ przesuwanie widoku
-            self.setCursor(Qt.ArrowCursor)
             self._pan = False
+            self.setCursor(Qt.ArrowCursor)
             event.accept()
         else:
             super().mouseReleaseEvent(event)
@@ -700,7 +854,7 @@ class GraphicsView(QGraphicsView):
 
     def addComponentToScene(self, comp, position):
         item = DraggablePixmapItem(comp)
-        # Skalowanie komponentu z uwzględnieniem dodatkowego współczynnika
+        # Skalowanie komponentu z uwzględnieniem dodatkowego wspólczynnika
         if self.parentWindow and hasattr(self.parentWindow, 'component_scale_factor'):
             total_scale = self.parentWindow.component_scale_factor
             item.setScale(total_scale)
@@ -786,7 +940,7 @@ class ComponentDatabaseWindow(QWidget):
             comp = selected.data(Qt.UserRole)
             reply = QMessageBox.question(
                 self, 'Potwierdzenie',
-                f"Czy na pewno usunąć komponent {comp.name}?",
+                f"Czy na pewno usunac komponent {comp.name}?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if reply == QMessageBox.Yes:
                 session.delete(comp)
@@ -845,7 +999,7 @@ class ComponentDialog(QDialog):
     def loadIcons(self):
         icons_dir = 'icons/'
         if not os.path.exists(icons_dir):
-            QMessageBox.critical(self, "Błąd", f"Folder z ikonami '{icons_dir}' nie istnieje.")
+            QMessageBox.critical(self, "Blad", f"Folder z ikonami '{icons_dir}' nie istnieje.")
             return
 
         for filename in os.listdir(icons_dir):
@@ -861,7 +1015,7 @@ class ComponentDialog(QDialog):
         self.manufacturerEdit.setText(self.component.manufacturer)
         self.costEdit.setText(str(self.component.cost))
 
-        # Ustawiamy wartość w typeComboBox
+        # Ustawiamy wartosc w typeComboBox
         index = self.typeComboBox.findText(self.component.type)
         if index >= 0:
             self.typeComboBox.setCurrentIndex(index)
@@ -875,24 +1029,88 @@ class ComponentDialog(QDialog):
                 break
 
     def accept(self):
-        # Sprawdzamy, czy wszystkie pola są wypełnione
+        # Sprawdzamy, czy wszystkie pola sa wypelnione
         if not self.nameEdit.text() or not self.manufacturerEdit.text() or not self.costEdit.text():
-            QMessageBox.warning(self, "Błąd", "Proszę wypełnić wszystkie pola.")
+            QMessageBox.warning(self, "Blad", "Proszę wypelnic wszystkie pola.")
             return
 
-        # Pobieramy wybraną ikonę
+        # Pobieramy wybrana ikonę
         selected_items = self.iconListWidget.selectedItems()
         if not selected_items:
-            QMessageBox.warning(self, "Błąd", "Proszę wybrać ikonę.")
+            QMessageBox.warning(self, "Blad", "Proszę wybrac ikonę.")
             return
         self.iconPath = selected_items[0].data(Qt.UserRole)
 
         super().accept()
-# Okno instrukcji obsługi
+
+class ConnectionLine(QGraphicsLineItem):
+    def __init__(self, start_item, end_item):
+        super().__init__()
+        self.start_item = start_item
+        self.end_item = end_item
+        self.setZValue(0.5)  # Ustawiamy zValue między planem a komponentami
+        pen = QPen(Qt.black, 1, Qt.DashLine)
+        self.setPen(pen)
+        self.updatePosition()
+        self.setAcceptHoverEvents(True)  # Umożliwiamy obslugę zdarzeń najechania
+
+
+        # Polacz sygnaly zmiany pozycji z metoda aktualizacji
+        self.start_item.positionChanged.connect(self.updatePosition)
+        self.end_item.positionChanged.connect(self.updatePosition)
+
+        # Ustawiamy flagi, aby linia mogla odbierac zdarzenia myszy
+        self.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsFocusable)
+        self.setAcceptHoverEvents(True)
+
+    def shape(self):
+        path = QPainterPath()
+        pen_width = self.pen().width() + 6  # Dodajemy dodatkowy margines do szerokosci pióra
+        path.moveTo(self.line().p1())
+        path.lineTo(self.line().p2())
+        path_stroker = QPainterPathStroker()
+        path_stroker.setWidth(pen_width)
+        stroked_path = path_stroker.createStroke(path)
+        return stroked_path
+
+    def updatePosition(self):
+        start_point = self.start_item.sceneBoundingRect().center()
+        end_point = self.end_item.sceneBoundingRect().center()
+        self.setLine(QLineF(start_point, end_point))
+
+    # Dodajemy metody obslugi zdarzeń myszy
+    def contextMenuEvent(self, event):
+        menu = QMenu()
+        delete_action = QAction("Usuń lacze", menu)
+        delete_action.triggered.connect(self.deleteLink)
+        menu.addAction(delete_action)
+        menu.exec_(event.screenPos())
+        event.accept()
+
+    def deleteLink(self):
+        # Usuń lacze z sceny i z listy w PlanEditorWindow
+        plan_editor = self.scene().views()[0].parentWindow
+        if self in plan_editor.links:
+            plan_editor.links.remove(self)
+        self.scene().removeItem(self)
+
+    def hoverEnterEvent(self, event):
+        pen = self.pen()
+        pen.setColor(Qt.red)  # Zmieniamy kolor na czerwony
+        self.setPen(pen)
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        pen = self.pen()
+        pen.setColor(Qt.black)  # Przywracamy oryginalny kolor
+        self.setPen(pen)
+        super().hoverLeaveEvent(event)
+
+# Okno instrukcji obslugi
 class UserManualWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Instrukcja Obsługi")
+        self.setWindowTitle("Instrukcja Obslugi")
         self.resize(600, 400)
         self.initUI()
 
@@ -912,7 +1130,7 @@ class UserManualWindow(QWidget):
                 manualText = f.read()
                 self.textEdit.setPlainText(manualText)
         except FileNotFoundError:
-            self.textEdit.setPlainText("Brak pliku z instrukcją obsługi.")
+            self.textEdit.setPlainText("Brak pliku z instrukcja obslugi.")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
