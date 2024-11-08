@@ -1,11 +1,12 @@
 import sys
+import os
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QAction,
                              QFileDialog, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QListWidget, QListWidgetItem,
                              QMessageBox, QLabel, QLineEdit, QFormLayout,
                              QDialog, QDialogButtonBox, QTextEdit,
                              QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                             QGraphicsItem, QGraphicsRectItem, QMenu, QSplitter)
+                             QGraphicsItem, QGraphicsRectItem, QMenu, QSplitter, QComboBox, QTreeWidget, QTreeWidgetItem)
 from PyQt5.QtGui import QPixmap, QIcon, QImage, QPainter, QTransform, QCursor, QPainterPath, QPen, QFont
 from PyQt5.QtCore import Qt, QMimeData, QPointF, QSize, QDataStream, QRectF, QVariant, QBuffer, QByteArray, QIODevice
 from sqlalchemy import create_engine, Column, Integer, String
@@ -22,6 +23,8 @@ from reportlab.lib.utils import ImageReader  # Do wczytywania obrazu z pamięci
 
 # Ustawienia bazy danych
 Base = declarative_base()
+component_types = ["Router", "Switch", "Access Point", "Firewall", "Server", "Centrala", "Gniazdko", "Czujnik temperatury", "Czujnik ruchu", "Czujnik zalania", "Wlacznik", "Alarm", "Czujnik dymu", "Oswielenie"]
+
 
 class Component(Base):
     __tablename__ = 'components'
@@ -32,6 +35,11 @@ class Component(Base):
     cost = Column(Integer)
     type = Column(String)
     icon_path = Column(String)  # Ścieżka do ikony
+
+engine = create_engine('sqlite:///components.db')
+Base.metadata.create_all(engine)
+Session = sessionmaker(bind=engine)
+session = Session()
 
 engine = create_engine('sqlite:///components.db')
 Base.metadata.create_all(engine)
@@ -350,8 +358,12 @@ class PlanEditorWindow(QMainWindow):
         self.setWindowTitle("Edytor Planu Budynku")
         self.resize(1200, 900)
         self.planFile = planFile
-        self.initUI()
         self.placedComponents = []
+        self.target_plan_width = 1200  # Ustawienie docelowej szerokości planu
+        self.plan_scale_factor = 1.0  # Inicjalizacja współczynnika skalowania planu
+        self.component_scale_factor = 0.5  # Dodatkowy współczynnik skalowania komponentów
+        self.initUI()
+
 
     def initUI(self):
         centralWidget = QWidget()
@@ -365,9 +377,11 @@ class PlanEditorWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal)
         mainLayout.addWidget(splitter)
 
-        self.componentList = QListWidget()
-        self.componentList.setIconSize(QSize(50, 50))
-        self.componentList.setDragEnabled(True)
+        # Zamiast QListWidget używamy QTreeWidget
+        self.componentTree = QTreeWidget()
+        self.componentTree.setHeaderHidden(True)  # Ukrywamy nagłówek
+        self.componentTree.setIconSize(QSize(50, 50))
+        self.componentTree.setDragEnabled(True)
         self.loadComponents()
 
         self.scene = QGraphicsScene()
@@ -376,12 +390,12 @@ class PlanEditorWindow(QMainWindow):
 
         self.loadPlan()
 
-        # Dodajemy listę komponentów i obszar roboczy do QSplitter
-        splitter.addWidget(self.componentList)
+        # Dodajemy drzewo komponentów i obszar roboczy do QSplitter
+        splitter.addWidget(self.componentTree)
         splitter.addWidget(self.view)
 
         # Ustawiamy minimalne szerokości
-        self.componentList.setMinimumWidth(200)
+        self.componentTree.setMinimumWidth(200)
         self.view.setMinimumWidth(400)
 
         # Ustawiamy proporcje początkowe
@@ -410,28 +424,64 @@ class PlanEditorWindow(QMainWindow):
             try:
                 doc = fitz.open(self.planFile)
                 page = doc.load_page(0)  # Wczytaj pierwszą stronę
-                pix = page.get_pixmap()
-                image_bytes = pix.tobytes("png")  # Użyj tonytes("png") zamiast getPNGData()
+
+                # Ustawienie wysokiej rozdzielczości renderowania
+                zoom_x = zoom_y = 3.0  # Możesz dostosować ten współczynnik
+                mat = fitz.Matrix(zoom_x, zoom_y)
+                pix = page.get_pixmap(matrix=mat)
+
+                image_bytes = pix.tobytes("png")
                 pixmap = QPixmap()
                 pixmap.loadFromData(image_bytes)
+
+                # Nie skalujemy pixmapy
+                self.plan_scale_factor = 1.0
                 self.planItem = self.scene.addPixmap(pixmap)
                 self.planItem.setZValue(-1)
             except Exception as e:
                 QMessageBox.critical(self, "Błąd", f"Nie można wczytać pliku PDF: {e}")
         else:
-            # Wczytanie obrazu tak jak wcześniej
+            # Wczytanie obrazu bez skalowania
             pixmap = QPixmap(self.planFile)
+            self.plan_scale_factor = 1.0
             self.planItem = self.scene.addPixmap(pixmap)
             self.planItem.setZValue(-1)  # Ustaw plan na tło
 
+        # Ustawienie rozmiaru sceny na rozmiar planu budynku
+        self.scene.setSceneRect(self.planItem.boundingRect())
+
+    def scalePixmap(self, pixmap, target_width):
+        # Obliczenie współczynnika skalowania
+        original_width = pixmap.width()
+        original_height = pixmap.height()
+        scale_factor = target_width / original_width
+        new_width = int(original_width * scale_factor)
+        new_height = int(original_height * scale_factor)
+        # Skalowanie pixmapy
+        scaled_pixmap = pixmap.scaled(new_width, new_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return scaled_pixmap, scale_factor
+
     def loadComponents(self):
+        # Pobieramy wszystkie komponenty z bazy danych
         components = session.query(Component).all()
+
+        # Tworzymy słownik kategorii
+        categories = {}
         for comp in components:
-            item = QListWidgetItem(comp.name)
-            item.setData(Qt.UserRole, comp)
+            if comp.type not in categories:
+                # Tworzymy nowy element kategorii
+                categoryItem = QTreeWidgetItem([comp.type])
+                categoryItem.setFlags(categoryItem.flags() & ~Qt.ItemIsDragEnabled)  # Wyłączamy przeciąganie dla kategorii
+                self.componentTree.addTopLevelItem(categoryItem)
+                categories[comp.type] = categoryItem
+
+        # Dodajemy komponenty do odpowiednich kategorii
+        for comp in components:
+            item = QTreeWidgetItem([comp.name])
+            item.setData(0, Qt.UserRole, comp)
             icon = QIcon(comp.icon_path)
-            item.setIcon(icon)
-            self.componentList.addItem(item)
+            item.setIcon(0, icon)
+            categories[comp.type].addChild(item)
 
     def saveProject(self):
         fileName, _ = QFileDialog.getSaveFileName(
@@ -554,7 +604,8 @@ class PlanEditorWindow(QMainWindow):
 # Niestandardowy QGraphicsView do obsługi przeciągania i upuszczania
 class GraphicsView(QGraphicsView):
     def __init__(self, scene, parent=None):
-        super().__init__(scene, parent)
+        super().__init__(scene)
+        self.setParent(parent)
         self.setRenderHint(QPainter.Antialiasing)
         self._pan = False
         self._panStartX = 0
@@ -562,7 +613,7 @@ class GraphicsView(QGraphicsView):
         self.setDragMode(QGraphicsView.NoDrag)
         self.setInteractive(True)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.parentWindow = parent  # Referencja do PlanEditorWindow
+        self.parentWindow = parent  # Reference to PlanEditorWindow
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -635,18 +686,24 @@ class GraphicsView(QGraphicsView):
                 row = stream.readInt32()
                 column = stream.readInt32()
                 mapItems = stream.readInt32()
+                comp = None
                 for i in range(mapItems):
                     role = stream.readInt32()
                     value = stream.readQVariant()
                     if role == Qt.UserRole:
                         comp = value
-                        self.addComponentToScene(comp, event.pos())
+                if comp:
+                    self.addComponentToScene(comp, event.pos())
             event.accept()
         else:
             event.ignore()
 
     def addComponentToScene(self, comp, position):
         item = DraggablePixmapItem(comp)
+        # Skalowanie komponentu z uwzględnieniem dodatkowego współczynnika
+        if self.parentWindow and hasattr(self.parentWindow, 'component_scale_factor'):
+            total_scale = self.parentWindow.component_scale_factor
+            item.setScale(total_scale)
         self.scene().addItem(item)
         item.setPos(self.mapToScene(position))
         item.setFocus()
@@ -700,7 +757,7 @@ class ComponentDatabaseWindow(QWidget):
                 name=dialog.nameEdit.text(),
                 manufacturer=dialog.manufacturerEdit.text(),
                 cost=int(dialog.costEdit.text()),
-                type=dialog.typeEdit.text(),
+                type=dialog.typeComboBox.currentText(),
                 icon_path=dialog.iconPath)
             session.add(new_comp)
             session.commit()
@@ -715,7 +772,7 @@ class ComponentDatabaseWindow(QWidget):
                 comp.name = dialog.nameEdit.text()
                 comp.manufacturer = dialog.manufacturerEdit.text()
                 comp.cost = int(dialog.costEdit.text())
-                comp.type = dialog.typeEdit.text()
+                comp.type = dialog.typeComboBox.currentText()
                 comp.icon_path = dialog.iconPath
                 session.commit()
                 self.loadComponents()
@@ -744,7 +801,7 @@ class ComponentDialog(QDialog):
     def __init__(self, component=None):
         super().__init__()
         self.setWindowTitle("Dodaj/Edytuj Komponent")
-        self.resize(400, 300)
+        self.resize(400, 500)
         self.component = component
         self.iconPath = ""
         self.initUI()
@@ -752,21 +809,32 @@ class ComponentDialog(QDialog):
             self.loadComponentData()
 
     def initUI(self):
-        layout = QFormLayout()
+        layout = QVBoxLayout()
         self.setLayout(layout)
+
+        formLayout = QFormLayout()
+        layout.addLayout(formLayout)
 
         self.nameEdit = QLineEdit()
         self.manufacturerEdit = QLineEdit()
         self.costEdit = QLineEdit()
-        self.typeEdit = QLineEdit()
-        self.iconButton = QPushButton("Wybierz ikonę")
-        self.iconButton.clicked.connect(self.selectIcon)
 
-        layout.addRow("Nazwa:", self.nameEdit)
-        layout.addRow("Producent:", self.manufacturerEdit)
-        layout.addRow("Koszt:", self.costEdit)
-        layout.addRow("Typ:", self.typeEdit)
-        layout.addRow("Ikona:", self.iconButton)
+        # Zmieniamy pole typu na QComboBox
+        self.typeComboBox = QComboBox()
+        self.typeComboBox.addItems(component_types)
+
+        # Zmieniamy wybór ikony na QListWidget
+        self.iconListWidget = QListWidget()
+        self.iconListWidget.setIconSize(QSize(64, 64))
+        self.iconListWidget.setViewMode(QListWidget.IconMode)
+        self.iconListWidget.setSelectionMode(QListWidget.SingleSelection)
+        self.loadIcons()
+
+        formLayout.addRow("Nazwa:", self.nameEdit)
+        formLayout.addRow("Producent:", self.manufacturerEdit)
+        formLayout.addRow("Koszt:", self.costEdit)
+        formLayout.addRow("Typ:", self.typeComboBox)
+        formLayout.addRow("Ikona:", self.iconListWidget)
 
         buttonBox = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -774,22 +842,52 @@ class ComponentDialog(QDialog):
         buttonBox.rejected.connect(self.reject)
         layout.addWidget(buttonBox)
 
-    def selectIcon(self):
-        options = QFileDialog.Options()
-        options |= QFileDialog.ReadOnly
-        fileName, _ = QFileDialog.getOpenFileName(
-            self, "Wybierz ikonę", "",
-            "Image Files (*.png *.jpg *.bmp)", options=options)
-        if fileName:
-            self.iconPath = fileName
+    def loadIcons(self):
+        icons_dir = 'icons/'
+        if not os.path.exists(icons_dir):
+            QMessageBox.critical(self, "Błąd", f"Folder z ikonami '{icons_dir}' nie istnieje.")
+            return
+
+        for filename in os.listdir(icons_dir):
+            if filename.lower().endswith(('.png', '.jpg', '.bmp')):
+                full_path = os.path.join(icons_dir, filename)
+                icon = QIcon(full_path)
+                item = QListWidgetItem(icon, filename)
+                item.setData(Qt.UserRole, full_path)
+                self.iconListWidget.addItem(item)
 
     def loadComponentData(self):
         self.nameEdit.setText(self.component.name)
         self.manufacturerEdit.setText(self.component.manufacturer)
         self.costEdit.setText(str(self.component.cost))
-        self.typeEdit.setText(self.component.type)
-        self.iconPath = self.component.icon_path
 
+        # Ustawiamy wartość w typeComboBox
+        index = self.typeComboBox.findText(self.component.type)
+        if index >= 0:
+            self.typeComboBox.setCurrentIndex(index)
+
+        # Ustawiamy zaznaczenie w iconListWidget
+        for i in range(self.iconListWidget.count()):
+            item = self.iconListWidget.item(i)
+            if item.data(Qt.UserRole) == self.component.icon_path:
+                item.setSelected(True)
+                self.iconListWidget.scrollToItem(item)
+                break
+
+    def accept(self):
+        # Sprawdzamy, czy wszystkie pola są wypełnione
+        if not self.nameEdit.text() or not self.manufacturerEdit.text() or not self.costEdit.text():
+            QMessageBox.warning(self, "Błąd", "Proszę wypełnić wszystkie pola.")
+            return
+
+        # Pobieramy wybraną ikonę
+        selected_items = self.iconListWidget.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(self, "Błąd", "Proszę wybrać ikonę.")
+            return
+        self.iconPath = selected_items[0].data(Qt.UserRole)
+
+        super().accept()
 # Okno instrukcji obsługi
 class UserManualWindow(QWidget):
     def __init__(self):
